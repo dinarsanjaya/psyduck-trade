@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """
 Professor Mode - Unified Trading System
-All-in-one: Live Scanner + Discord Board + SL/TP Watchdog + Autopilot
+Scanner + SL/TP Watchdog + Autopilot + Discord Board
 """
 import time
 import json
-import os
-import threading
 import requests
 import warnings
 warnings.filterwarnings("ignore")
 
-from datetime import datetime, timezone
+from datetime import datetime
 import pytz
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 from config import (
-    DISCORD_BOT_TOKEN, DISCORD_SIGNAL_WEBHOOK_URL, DISCORD_BOARD_CHANNEL_ID,
-    DISCORD_SIGNAL_CHANNEL_ID, DISCORD_API_URL,
+    DISCORD_BOARD_CHANNEL_ID,
     STOP_LOSS_PCT, TAKE_PROFIT_PCT,
-    RISK_PER_TRADE, MAX_POSITIONS, LEVERAGE, INTERVAL, API_KEY, API_SECRET, FUTURES_URL as BASE_URL,
+    MAX_POSITIONS, LEVERAGE, FUTURES_URL as BASE_URL,
     COINS_WHITELIST, COIN_UNIVERSE, MIN_VOLUME_24H,
     RSI_OVERSOLD, RSI_OVERBOUGHT, MOM_THRESHOLD, VOL_RATIO_MIN, CONF_ALERT,
     USE_DYNAMIC_SL, STOP_LOSS_ATR_MULT, STOP_LOSS_PCT_FALLBACK,
@@ -29,16 +26,20 @@ from config import (
     USE_PARTIAL_TP, TP_1_RATIO, TP_2_RATIO,
 )
 
-BOARD_MSG_FILE = "board_msg_id.txt"
+# ─── UTILS ───────────────────────────────────────────────────────────────────
+from utils.indicators import calc_rsi, calc_mom, calc_vol_ratio, calc_ema, calc_atr
+from utils.discord import (
+    discord_notify, discord_req, build_board_embed,
+    get_board_msg_id, save_board_msg_id,
+)
+
 LIVE_DATA_FILE = "live_board_data.json"
-SCAN_INTERVAL = 0   # continuous
-SLTP_INTERVAL = 0   # continuous
-AUTOPILOT_INTERVAL = 0  # continuous
+SCAN_INTERVAL = 0
+SLTP_INTERVAL = 0
+AUTOPILOT_INTERVAL = 0
 
-DISCORD_API = DISCORD_API_URL
-
-ALERT_COOLDOWN = 90   # seconds between alerts per symbol (longer to avoid overtrading)
-HISTORY_CANDLES = 20  # enough for RSI(14) + EMA(20)
+ALERT_COOLDOWN = 90
+HISTORY_CANDLES = 20
 
 # ─── STATE ────────────────────────────────────────────────────────────────────
 latest_tickers = {}
@@ -57,7 +58,7 @@ SCAN_ERROR_THRESHOLD = 5
 AUTOPILOT_COOLDOWN = 300
 MAX_DRAWDOWN_PCT = -10
 
-# ─── SELF-HEALING FUNCTIONS ───────────────────────────────────────────────────
+# ─── SELF-HEALING ─────────────────────────────────────────────────────────────
 
 def self_heal_proxy():
     global consecutive_proxy_errors
@@ -72,8 +73,7 @@ def self_heal_circuit_breaker():
     global consecutive_scan_errors, autopilot_paused_until
     consecutive_scan_errors += 1
     if consecutive_scan_errors >= SCAN_ERROR_THRESHOLD and autopilot_paused_until == 0:
-        pause_until = time.time() + AUTOPILOT_COOLDOWN
-        autopilot_paused_until = pause_until
+        autopilot_paused_until = time.time() + AUTOPILOT_COOLDOWN
         print(f"[SELF-HEAL] Scan errors ({consecutive_scan_errors}) >= {SCAN_ERROR_THRESHOLD} — pausing autopilot for {AUTOPILOT_COOLDOWN}s")
         discord_notify(
             f"⚠️ Autopilot PAUSED — {consecutive_scan_errors} consecutive errors",
@@ -90,11 +90,9 @@ def self_heal_check_drawdown(positions):
         total_balance = next((float(a.get("balance", 0)) + float(a.get("availableBalance", 0)) for a in acc if a.get("asset") == "USDT"), 0)
         if total_balance <= 0:
             return False
-        
         open_pos = [p for p in positions if float(p.get("positionAmt", 0)) != 0]
         total_pnl = sum(float(p.get("unRealizedProfit", 0)) for p in open_pos)
         total_notional = sum(abs(float(p.get("positionAmt", 0)) * float(p.get("entryPrice", 1))) for p in open_pos)
-        
         if total_notional > 0:
             drawdown_pct = (total_pnl / total_notional) * 100
             if drawdown_pct < MAX_DRAWDOWN_PCT:
@@ -112,68 +110,16 @@ def self_heal_check_drawdown(positions):
 def self_heal_health_check():
     global last_health_check, consecutive_scan_errors, consecutive_proxy_errors, autopilot_paused_until
     now = time.time()
-    
     if now - last_health_check < HEALTH_CHECK_INTERVAL:
         return
     last_health_check = now
-    
-    # Check if autopilot should resume
     if autopilot_paused_until > 0 and now >= autopilot_paused_until:
         print(f"[SELF-HEAL] Autopilot cooldown expired — resuming")
         autopilot_paused_until = 0
         consecutive_scan_errors = 0
         discord_notify("✅ Autopilot RESUMED", "Self-healing complete. Autopilot is active again.", color=0x00FF00)
-    
-    # Reset error counters on success
     consecutive_proxy_errors = 0
     consecutive_scan_errors = 0
-
-# ─── DISCORD ─────────────────────────────────────────────────────────────────
-
-def discord_req(method, path, data=None):
-    url = f"{DISCORD_API}{path}"
-    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
-    try:
-        if method == "GET": r = requests.get(url, headers=headers, timeout=10)
-        elif method == "POST": r = requests.post(url, headers=headers, json=data, timeout=10)
-        elif method == "PATCH": r = requests.patch(url, headers=headers, json=data, timeout=10)
-        if r.status_code in (200, 201): return r.json()
-        print(f"[DISCORD ERROR] {method} {path} → HTTP {r.status_code}: {r.text[:200]}")
-        return None
-    except Exception as e:
-        print(f"[DISCORD ERROR] {method} {path} → {e}")
-        return None
-
-def get_board_msg_id():
-    try:
-        with open(BOARD_MSG_FILE) as f:
-            return f.read().strip() or None
-    except: return None
-
-def save_board_msg_id(msg_id):
-    with open(BOARD_MSG_FILE, "w") as f:
-        f.write(str(msg_id))
-
-def discord_notify(title, description, color=0xFFAA00, fields=None):
-    payload = {
-        "username": "Professor Psyduck 🐤",
-        "embeds": [{
-            "title": title,
-            "description": description,
-            "color": color,
-            "footer": {"text": f"Professor Mode 🐤 | {datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S WIB')}"}
-        }]
-    }
-    if fields:
-        payload["embeds"][0]["fields"] = fields
-    try:
-        r = requests.post(DISCORD_SIGNAL_WEBHOOK_URL, json=payload, timeout=10)
-        if r.status_code not in (200, 204):
-            url = f"{DISCORD_API}/channels/{DISCORD_SIGNAL_CHANNEL_ID}/messages"
-            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
-            requests.post(url, json=payload, headers=headers, timeout=10)
-    except:
-        pass
 
 # ─── BINANCE API ─────────────────────────────────────────────────────────────
 
@@ -187,15 +133,13 @@ def fetch_klines(symbol, limit=HISTORY_CANDLES):
     url = f"{BASE_URL}/fapi/v1/klines"
     for attempt in range(3):
         try:
-            r = requests.get(url, params={"symbol": symbol, "interval": "1m", "limit": limit},
-                            timeout=10)
+            r = requests.get(url, params={"symbol": symbol, "interval": "1m", "limit": limit}, timeout=10)
             r.raise_for_status()
             return r.json()
         except:
             if attempt < 2:
                 continue
-            else:
-                raise
+            raise
     return None
 
 def get_positions():
@@ -206,72 +150,15 @@ def market_close(symbol, side, qty):
     from trading import market_close as mc
     return mc(symbol, side, qty)
 
-def get_mark_prices(symbols):
-    """Get current mark prices for symbols."""
-    result = {}
-    try:
-        url = f"{BASE_URL}/fapi/v1/ticker/price"
-        for sym in symbols:
-            try:
-                r = requests.get(url, params={"symbol": sym}, timeout=5)
-                if r.status_code == 200:
-                    result[sym] = float(r.json()["price"])
-            except:
-                pass
-    except:
-        pass
-    return result
-
-# ─── INDICATORS ─────────────────────────────────────────────────────────────
-
-def calc_rsi(prices, period=14):
-    if len(prices) < period + 1: return 50.0
-    deltas = [prices[i]-prices[i-1] for i in range(1,len(prices))]
-    gains=[d if d>0 else 0 for d in deltas]
-    losses=[-d if d<0 else 0 for d in deltas]
-    ag=sum(gains[-period:])/period; al=sum(losses[-period:])/period
-    rs=ag/al if al>0 else 999
-    return 100-100/(1+rs)
-
-def calc_mom(prices, bars=5):
-    if len(prices) < bars+1: return 0.0
-    return (prices[-1]-prices[-bars])/prices[-bars]*100
-
-def calc_vol_ratio(volumes):
-    if len(volumes) < 10: return 1.0
-    avg = sum(volumes[-20:])/20 if len(volumes)>=20 else sum(volumes)/len(volumes)
-    return volumes[-1]/avg if avg>0 else 1.0
-
-def calc_ema(prices, length=20):
-    """Calculate EMA. Returns None if not enough data."""
-    if len(prices) < length: return None
-    k = 2 / (length + 1)
-    ema = sum(prices[:length]) / length
-    for price in prices[length:]:
-        ema = price * k + ema * (1 - k)
-    return ema
-
-def calc_atr(prices, period=14):
-    """Calculate Average True Range for dynamic SL."""
-    if len(prices) < period + 1: return None
-    tr_list = []
-    for i in range(1, min(len(prices), 50)):
-        high = prices[i]
-        low = prices[i]
-        prev_close = prices[i-1]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        tr_list.append(tr)
-    if len(tr_list) < period: return None
-    return sum(tr_list[-period:]) / period
-
-# ─── LIVE SCANNER ────────────────────────────────────────────────────────────
+# ─── SIGNAL CHECK ────────────────────────────────────────────────────────────
 
 def check_signal(sym, ticker, klines_data):
     now = time.time()
     if sym in last_alert and (now - last_alert[sym]) < ALERT_COOLDOWN:
         return None
     kl = klines_data.get(sym)
-    if not kl or len(kl) < 20: return None
+    if not kl or len(kl) < 20:
+        return None
     closes = [float(k[4]) for k in kl]
     volumes = [float(k[5]) for k in kl]
     rsi = calc_rsi(closes)
@@ -279,29 +166,23 @@ def check_signal(sym, ticker, klines_data):
     vol_ratio = calc_vol_ratio(volumes)
     price = float(ticker.get("lastPrice", closes[-1]))
     change_pct = float(ticker.get("priceChangePercent", 0))
-    
     ema = calc_ema(closes, EMA_LENGTH) if USE_EMA_FILTER else None
     atr = calc_atr(closes)
-    
+
     triggers = []
-    
+
     if rsi < RSI_OVERSOLD and mom5 > MOM_THRESHOLD:
-        if USE_EMA_FILTER and ema and price < ema:
-            pass
-        else:
+        if not (USE_EMA_FILTER and ema and price < ema):
             conf = min(9, 5 + int(mom5 * 10) + int(vol_ratio))
             triggers.append(("LONG", f"RSI oversold bounce (RSI={rsi:.0f})", conf, rsi, mom5, vol_ratio, atr))
-    
+
     if rsi > RSI_OVERBOUGHT and mom5 < -MOM_THRESHOLD:
-        if USE_EMA_FILTER and ema and price > ema:
-            pass
-        else:
+        if not (USE_EMA_FILTER and ema and price > ema):
             conf = min(9, 5 + int(abs(mom5) * 10) + int(vol_ratio))
             triggers.append(("SHORT", f"RSI overbought fade (RSI={rsi:.0f})", conf, rsi, mom5, vol_ratio, atr))
-    
+
     if vol_ratio > VOL_RATIO_MIN and abs(mom5) > MOM_THRESHOLD:
         direction = "LONG" if mom5 > 0 else "SHORT"
-        # EMA filter: align with trend
         if USE_EMA_FILTER and ema:
             if direction == "LONG" and price < ema:
                 pass
@@ -309,137 +190,44 @@ def check_signal(sym, ticker, klines_data):
                 pass
         conf = min(9, 4 + int(vol_ratio * 2) + int(abs(mom5) * 10))
         triggers.append((direction, f"Vol spike {vol_ratio:.1f}x", conf, rsi, mom5, vol_ratio, atr))
-    
-    if not triggers: return None
+
+    if not triggers:
+        return None
     triggers.sort(key=lambda x: -x[2])
     signal, reason, confidence, rsi_val, mom_val, vol_r, atr_val = triggers[0]
-    if confidence < CONF_ALERT: return None
-    
-    return {"symbol": sym, "signal": signal, "price": price, "change_pct": change_pct,
-            "reason": reason, "confidence": confidence, "rsi": round(rsi_val,1),
-            "mom5": round(mom_val,2), "vol_ratio": round(vol_r,2),
-            "atr": atr_val, "ema": ema}
-
-def build_board_embed(data, positions=None):
-    rows = data.get("rows", [])
-    ts = data.get("ts", "")
-    tracked = data.get("tracked", 0)
-    cycle = data.get("cycle", 0)
-    longs  = [r for r in rows if r.get("signal") == "📈BOUNCE"]
-    spikes = [r for r in rows if r.get("signal") == "⚡SPIKE"]
-    fades  = [r for r in rows if r.get("signal") == "📉FADE"]
-
-    def fmt(r):
-        ema = r.get("ema")
-        ema_str = f" | EMA `${ema:.4f}`" if ema else ""
-        arrow = r.get("arrow","▲")
-        chg = r.get("change_pct", 0)
-        arrow_str = f"{arrow}{abs(chg):.2f}%"
-        return f'`{r["symbol"]}` {arrow_str} RSI `{r["rsi"]:.0f}` Mom `{r["mom5"]:+.2f}%`{ema_str}'
-
-    sections = []
-    if longs:
-        longs.sort(key=lambda x: -x["mom5"])
-        lines = [f'🟢 {fmt(r)}' for r in longs[:8]]
-        sections.append(("🟢 LONG", lines, 0x00FF00))
-    if fades:
-        fades.sort(key=lambda x: -abs(x["mom5"]))
-        lines = [f'🔴 {fmt(r)}' for r in fades[:8]]
-        sections.append(("🔴 SHORT", lines, 0xFF4444))
-    if spikes:
-        spikes.sort(key=lambda x: -x["vol_ratio"])
-        lines = [f'⚡ {fmt(r)}' for r in spikes[:8]]
-        sections.append(("⚡ SPIKE", lines, 0xFFD700))
-
-    # Build description
-    if not sections:
-        desc = "_No active signals - scanning..._"
-        color = 0x555555
-    else:
-        parts = []
-        for title, lines, _ in sections:
-            parts.append(f"**{title}**")
-            parts.extend(lines)
-        desc = "\n".join(parts)
-        color = 0x00FF00 if longs and not fades else (0xFF4444 if fades else 0x555555)
-
-    total = len(longs)+len(spikes)+len(fades)
-    open_pos = [p for p in positions if float(p.get("positionAmt", 0)) != 0] if positions else []
-
-    # Add open positions section
-    fields = [
-        {"name": "🎯 Config", "value": f"SL: `{STOP_LOSS_PCT}%`/ATR | TP: `{TP_1_RATIO}x`/`{TP_2_RATIO}x` | Lev: `{LEVERAGE}x` | Pos: `{len(open_pos)}/{MAX_POSITIONS}`", "inline": False},
-        {"name": "📡 Scanner", "value": f"Whitelist: `{len(COINS_WHITELIST)}` coins | `{ts}`", "inline": False}
-    ]
-
-    # Position fields
-    if open_pos:
-        syms = [p["symbol"] for p in open_pos]
-        mark_prices = get_mark_prices(syms)
-        
-        pos_lines = []
-        total_pnl = 0.0
-        for p in open_pos:
-            amt = float(p["positionAmt"])
-            entry = float(p["entryPrice"])
-            sym = p["symbol"]
-            upnl = float(p.get("unRealizedProfit", 0))
-            mark = mark_prices.get(sym, entry)
-            side = "🟢LONG" if amt > 0 else "🔴SHORT"
-            emoji = "🟢" if upnl >= 0 else "🔴"
-            notional = entry * abs(amt)
-            pnl_pct = (upnl / notional) * 100 * LEVERAGE if notional > 0 else 0
-            pos_lines.append(f"{emoji} **{sym}** {side} `${abs(amt)}` | Mark `${mark:.2f}` | Entry `${entry:.2f}` | PnL `${upnl:+.2f}` ({pnl_pct:+.1f}%) | Lev `{LEVERAGE}x`")
-            total_pnl += upnl
-
-        fields.append({
-            "name": f"📊 Open Positions ({len(open_pos)}) | Total PnL: `{total_pnl:+.2f}`",
-                "value": "\n".join(pos_lines),
-                "inline": False
-            })
-
+    if confidence < CONF_ALERT:
+        return None
     return {
-        "title": "⚡ Professor Psyduck - Live Scanner 🐤",
-        "description": desc,
-        "color": color,
-        "fields": fields,
-        "footer": {"text": f"🟢 LIVE | Scan #{cycle} | {tracked} coins | {ts}"}
+        "symbol": sym, "signal": signal, "price": price, "change_pct": change_pct,
+        "reason": reason, "confidence": confidence, "rsi": round(rsi_val, 1),
+        "mom5": round(mom_val, 2), "vol_ratio": round(vol_r, 2),
+        "atr": atr_val, "ema": ema
     }
 
 # ─── SL/TP WATCHDOG ─────────────────────────────────────────────────────────
 
 def check_sl_tp():
-    """Check if any position hit SL, partial TP, or full TP. Auto-close if hit."""
-    debug_log = []
     try:
         positions = get_positions()
-        if not positions: return
+        if not positions:
+            return
 
-        open_count = 0
-        for p in positions:
-            amt = float(p.get("positionAmt", 0))
-            if amt == 0: continue
-            open_count += 1
-
-        debug_log.append(f"[SLTP] Checking {open_count} open positions")
+        open_count = sum(1 for p in positions if float(p.get("positionAmt", 0)) != 0)
+        print(f"[SLTP] Checking {open_count} open positions")
 
         for p in positions:
             amt = float(p.get("positionAmt", 0))
-            if amt == 0: continue
+            if amt == 0:
+                continue
             entry = float(p.get("entryPrice", 0))
             sym = p["symbol"]
             upnl = float(p.get("unRealizedProfit", 0))
 
-            if amt > 0:  # LONG
-                side = "SELL"  # close LONG → SELL
-                abs_amt = abs(amt)
-                direction = "LONG"
-            else:  # SHORT
-                side = "BUY"   # close SHORT → BUY
-                abs_amt = abs(amt)
-                direction = "SHORT"
+            direction = "LONG" if amt > 0 else "SHORT"
+            side = "SELL" if amt > 0 else "BUY"
+            abs_amt = abs(amt)
 
-            # Get current price (with fallback)
+            # Get current price
             price = None
             url = f"{BASE_URL}/fapi/v1/ticker/price"
             for _ in range(2):
@@ -451,14 +239,13 @@ def check_sl_tp():
                 except:
                     continue
             if price is None:
-                # Fallback to board data price
                 price = latest_tickers.get(sym, {}).get("lastPrice")
                 if price:
                     price = float(price)
             if price is None or price == 0:
                 continue
 
-            # Dynamic SL using ATR if available
+            # Dynamic SL using ATR
             try:
                 kl = fetch_klines(sym)
                 if kl and len(kl) >= 15:
@@ -475,34 +262,32 @@ def check_sl_tp():
                 sl_pct = STOP_LOSS_PCT
 
             if direction == "LONG":
-                sl_price = round(entry * (1 - sl_pct/100), 8)
-                tp1_price = round(entry * (1 + TAKE_PROFIT_PCT/100 * TP_1_RATIO), 8)
-                tp2_price = round(entry * (1 + TAKE_PROFIT_PCT/100 * TP_2_RATIO), 8)
+                sl_price = round(entry * (1 - sl_pct / 100), 8)
+                tp1_price = round(entry * (1 + TAKE_PROFIT_PCT / 100 * TP_1_RATIO), 8)
+                tp2_price = round(entry * (1 + TAKE_PROFIT_PCT / 100 * TP_2_RATIO), 8)
             else:
-                sl_price = round(entry * (1 + sl_pct/100), 8)
-                tp1_price = round(entry * (1 - TAKE_PROFIT_PCT/100 * TP_1_RATIO), 8)
-                tp2_price = round(entry * (1 - TAKE_PROFIT_PCT/100 * TP_2_RATIO), 8)
+                sl_price = round(entry * (1 + sl_pct / 100), 8)
+                tp1_price = round(entry * (1 - TAKE_PROFIT_PCT / 100 * TP_1_RATIO), 8)
+                tp2_price = round(entry * (1 - TAKE_PROFIT_PCT / 100 * TP_2_RATIO), 8)
 
-            # Check SL
+            # Check SL/TP trigger
             triggered = None
             if direction == "LONG" and price <= sl_price:
                 triggered = ("SL", sl_price, price, abs_amt)
             elif direction == "SHORT" and price >= sl_price:
                 triggered = ("SL", sl_price, price, abs_amt)
             elif USE_PARTIAL_TP:
-                # Check partial TP1 (close 50%)
                 if direction == "LONG" and price >= tp1_price:
                     triggered = ("TP1", tp1_price, price, abs_amt / 2)
                 elif direction == "SHORT" and price <= tp1_price:
                     triggered = ("TP1", tp1_price, price, abs_amt / 2)
-                # Full TP2 (close remaining)
                 elif direction == "LONG" and price >= tp2_price:
                     triggered = ("TP2", tp2_price, price, abs_amt)
                 elif direction == "SHORT" and price <= tp2_price:
                     triggered = ("TP2", tp2_price, price, abs_amt)
 
             if not triggered:
-                if abs(upnl) > 10:  # Only log significant PnL positions
+                if abs(upnl) > 10:
                     print(f"[SLTP] {sym} {direction}: price={price:.4f} entry={entry:.4f} sl={sl_price:.4f} tp1={tp1_price:.4f} tp2={tp2_price:.4f} upnl={upnl:.2f}")
             else:
                 level, level_price, current_price, close_qty = triggered
@@ -520,24 +305,21 @@ def check_sl_tp():
                             exit_price = sum(float(f.get("price", 0)) for f in fills) / len(fills)
                         except:
                             pass
-                    # Calculate realized PnL manually
                     if exit_price and entry:
-                        is_long = (direction == "LONG")
-                        realized_pnl = (exit_price - entry) * close_qty if is_long else (entry - exit_price) * close_qty
+                        realized_pnl = (exit_price - entry) * close_qty if direction == "LONG" else (entry - exit_price) * close_qty
                     else:
                         realized_pnl = 0.0
-                    print(f"\n{'='*55}")
+                    print(f"\n{'=' * 55}")
                     print(f"{emoji} {sym} {level_name} HIT! Qty: {close_qty:.4f}")
                     print(f"   Entry: ${entry} | Exit: ${exit_price:.4f} | Realized PnL: ${realized_pnl:+.4f}")
-                    print(f"{'='*55}")
+                    print(f"{'=' * 55}")
                     discord_notify(
                         f"{emoji} {sym} {level_name} Hit",
                         f"**Direction:** {direction}\n**Entry:** `${entry}`\n**Exit:** `${exit_price:.4f}`\n**Qty:** `{close_qty:.4f}`\n**Realized PnL:** `${realized_pnl:+.4f}`\n**Leverage:** {LEVERAGE}x",
                         color=color
                     )
                 time.sleep(0.5)
-        
-        # ── Drawdown check ──
+
         try:
             self_heal_check_drawdown(positions)
         except:
@@ -545,39 +327,38 @@ def check_sl_tp():
     except Exception as e:
         print(f"[SL/TP ERROR] {e}")
 
-# ─── AUTOPILOT ───────────────────────────────────────────────────────────────
+# ─── AUTOPILOT ────────────────────────────────────────────────────────────────
 
 def run_autopilot():
-    """Run one autopilot cycle — stricter filters, EMA trend confirmation."""
     try:
         from trading import place_order, set_leverage, calc_quantity_from_risk, get_account
         acc = get_account()
-        usdt_balance = next((float(a.get("availableBalance",0)) for a in acc if a.get("asset")=="USDT"), 0)
-
+        usdt_balance = next((float(a.get("availableBalance", 0)) for a in acc if a.get("asset") == "USDT"), 0)
         positions = get_positions()
-        open_syms = {p["symbol"] for p in positions if float(p.get("positionAmt",0)) != 0}
+        open_syms = {p["symbol"] for p in positions if float(p.get("positionAmt", 0)) != 0}
         open_count = len(open_syms)
 
         print(f"\n[AUTOPILOT] Balance: ${usdt_balance:.2f} | Positions: {open_count}/{MAX_POSITIONS}")
 
-        # Sort coins by volume based on COIN_UNIVERSE setting
         if COIN_UNIVERSE == "whitelist":
             coins_to_check = [(s, t) for s, t in latest_tickers.items() if s in COINS_WHITELIST]
         elif COIN_UNIVERSE == "top_movers":
-            coins_to_check = sorted(latest_tickers.items(), key=lambda x: abs(float(x[1].get("priceChangePercent",0) or 0)), reverse=True)[:50]
-        else:  # "all"
+            coins_to_check = sorted(latest_tickers.items(), key=lambda x: abs(float(x[1].get("priceChangePercent", 0) or 0)), reverse=True)[:50]
+        else:
             coins_to_check = list(latest_tickers.items())
-        coins_to_check.sort(key=lambda x: float(x[1].get("quoteVolume",0) or 0), reverse=True)
+        coins_to_check.sort(key=lambda x: float(x[1].get("quoteVolume", 0) or 0), reverse=True)
 
         for sym, ticker in coins_to_check:
-            if open_count >= MAX_POSITIONS: break
-            if sym in open_syms: continue
-
+            if open_count >= MAX_POSITIONS:
+                break
+            if sym in open_syms:
+                continue
             try:
                 kl = fetch_klines(sym)
             except:
                 continue
-            if not kl or len(kl) < 20: continue
+            if not kl or len(kl) < 20:
+                continue
 
             closes = [float(k[4]) for k in kl]
             volumes = [float(k[5]) for k in kl]
@@ -589,19 +370,18 @@ def run_autopilot():
 
             signal = None
             if rsi < RSI_OVERSOLD and mom5 > MOM_THRESHOLD:
-                # EMA filter for LONG
                 if USE_EMA_FILTER and ema_val and price < ema_val:
                     print(f"  [SKIP] {sym} LONG — price below EMA ({price:.4f} < {ema_val:.4f})")
                     continue
                 signal = "LONG"
             elif rsi > RSI_OVERBOUGHT and mom5 < -MOM_THRESHOLD:
-                # EMA filter for SHORT
                 if USE_EMA_FILTER and ema_val and price > ema_val:
                     print(f"  [SKIP] {sym} SHORT — price above EMA ({price:.4f} > {ema_val:.4f})")
                     continue
                 signal = "SHORT"
 
-            if not signal: continue
+            if not signal:
+                continue
 
             conf = min(9, 5 + int(abs(mom5) * 10) + int(vol_ratio))
             if conf < CONF_ALERT:
@@ -612,8 +392,8 @@ def run_autopilot():
             try:
                 set_leverage(sym, LEVERAGE)
                 qty = calc_quantity_from_risk(sym, usdt_balance, price, STOP_LOSS_PCT_FALLBACK, LEVERAGE)
-                if qty <= 0: continue
-
+                if qty <= 0:
+                    continue
                 result = place_order(sym, side, "MARKET", qty)
                 if result and result.get("orderId"):
                     fills = result.get("fills", [{}])
@@ -622,55 +402,46 @@ def run_autopilot():
                     discord_notify(
                         f"✅ {sym} {signal} Opened",
                         f"**Price:** `${avg_price}`\n**Qty:** `{qty}`\n**Leverage:** {LEVERAGE}x\n**Conf:** {conf}/9\n**RSI:** {rsi:.0f} | **Mom:** {mom5:+.2f}%\n**EMA:** {ema_val:.4f if ema_val else 'N/A'}",
-                        color=0x00FF00 if signal=="LONG" else 0xFF4444
+                        color=0x00FF00 if signal == "LONG" else 0xFF4444
                     )
                     open_count += 1
                     time.sleep(1)
             except Exception as e:
                 print(f"  [ENTRY ERROR] {sym}: {e}")
-
     except Exception as e:
         print(f"[AUTOPILOT ERROR] {e}")
 
-# ─── MAIN LOOPS ─────────────────────────────────────────────────────────────
+# ─── SCAN CYCLE ─────────────────────────────────────────────────────────────
 
 def scan_cycle():
     global latest_tickers, ticker_history, last_alert, board_cycle
 
     try:
-        # Fetch account balance for position sizing
         try:
             from trading import get_account, get_positions
-            acc_bal = next((a for a in get_account() if a.get("asset")=="USDT"), {})
+            acc_bal = next((a for a in get_account() if a.get("asset") == "USDT"), {})
             open_pos_check = True
         except:
             acc_bal = {}
             open_pos_check = False
 
-        # Fetch all tickers (one API call)
         all_tickers = fetch_all_tickers()
         usdt = {s: t for s, t in all_tickers.items() if s.endswith("USDT")}
-
-        # Filter by MIN_VOLUME_24H
         usdt = {s: t for s, t in usdt.items() if float(t.get("quoteVolume", 0) or 0) >= MIN_VOLUME_24H}
 
-        # Sort and limit
         if COIN_UNIVERSE == "top_movers":
-            top = sorted(usdt.items(), key=lambda x: abs(float(x[1].get("priceChangePercent",0) or 0)), reverse=True)[:50]
+            top = sorted(usdt.items(), key=lambda x: abs(float(x[1].get("priceChangePercent", 0) or 0)), reverse=True)[:50]
         elif COIN_UNIVERSE == "whitelist":
             top = [(s, t) for s, t in usdt.items() if s in COINS_WHITELIST]
-            top.sort(key=lambda x: float(x[1].get("quoteVolume",0) or 0), reverse=True)
-        elif COIN_UNIVERSE == "all":
-            top = sorted(usdt.items(), key=lambda x: float(x[1].get("quoteVolume",0) or 0), reverse=True)
+            top.sort(key=lambda x: float(x[1].get("quoteVolume", 0) or 0), reverse=True)
         else:
-            top = sorted(usdt.items(), key=lambda x: float(x[1].get("quoteVolume",0) or 0), reverse=True)
+            top = sorted(usdt.items(), key=lambda x: float(x[1].get("quoteVolume", 0) or 0), reverse=True)
 
         latest_tickers = dict(top)
 
         now = time.time()
-        ts = datetime.now(pytz.timezone('Asia/Jakarta')).strftime("%H:%M:%S")
+        ts = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%H:%M:%S")
 
-        # Update ticker history
         for sym, ticker in top:
             price = float(ticker.get("lastPrice", 0))
             volume = float(ticker.get("volume", 0))
@@ -679,9 +450,9 @@ def scan_cycle():
             if len(ticker_history[sym]) > 20:
                 ticker_history[sym] = ticker_history[sym][-20:]
 
-        # Build board rows — fetch klines for top coins (PARALLEL)
+        # Parallel klines fetch
         klines_cache = {}
-        scan_count = len(COINS_WHITELIST) if COIN_UNIVERSE == "whitelist" else (50 if COIN_UNIVERSE == "top_movers" else 50)
+        scan_count = len(COINS_WHITELIST) if COIN_UNIVERSE == "whitelist" else 50
         syms_to_fetch = [sym for sym, _ in top[:scan_count]]
         with ThreadPoolExecutor(max_workers=min(20, len(syms_to_fetch))) as executor:
             futures = {executor.submit(fetch_klines, sym): sym for sym in syms_to_fetch}
@@ -712,9 +483,12 @@ def scan_cycle():
                 atr_val = calc_atr(closes) if USE_DYNAMIC_SL else None
 
             signal = ""
-            if rsi < RSI_OVERSOLD and mom5 > MOM_THRESHOLD: signal = "📈BOUNCE"
-            elif rsi > RSI_OVERBOUGHT and mom5 < -MOM_THRESHOLD: signal = "📉FADE"
-            elif vol_r > VOL_RATIO_MIN and abs(mom5) > MOM_THRESHOLD: signal = "⚡SPIKE"
+            if rsi < RSI_OVERSOLD and mom5 > MOM_THRESHOLD:
+                signal = "📈BOUNCE"
+            elif rsi > RSI_OVERBOUGHT and mom5 < -MOM_THRESHOLD:
+                signal = "📉FADE"
+            elif vol_r > VOL_RATIO_MIN and abs(mom5) > MOM_THRESHOLD:
+                signal = "⚡SPIKE"
 
             rows.append({"symbol": sym, "price": price, "change_pct": chg,
                         "rsi": rsi, "mom5": mom5, "vol_ratio": vol_r,
@@ -726,38 +500,40 @@ def scan_cycle():
         with open(LIVE_DATA_FILE, "w") as f:
             json.dump(board_data, f)
 
-        # ── Signal entry: notify + immediate order ──
+        # Signal entry + immediate order
         positions = get_positions() if open_pos_check else None
         open_syms = {p["symbol"] for p in positions if float(p.get("positionAmt", 0)) != 0} if positions else set()
         open_count = len(open_syms)
 
         for sym, ticker in top[:scan_count]:
-            if open_count >= MAX_POSITIONS: break
-            if sym in open_syms: continue
+            if open_count >= MAX_POSITIONS:
+                break
+            if sym in open_syms:
+                continue
 
             sig = check_signal(sym, ticker, klines_cache)
-            if not sig: continue
+            if not sig:
+                continue
 
             last_alert[sym] = now
-            open_count += 1  # optimistic count
+            open_count += 1
 
-            # Dynamic SL
             if USE_DYNAMIC_SL and sig.get("atr"):
                 atr_pct = sig["atr"] / sig["price"] * 100
                 sl_pct = max(atr_pct * STOP_LOSS_ATR_MULT, STOP_LOSS_PCT_FALLBACK)
             else:
                 sl_pct = STOP_LOSS_PCT
 
-            sl = sig["price"] * (1-sl_pct/100) if sig["signal"]=="LONG" else sig["price"] * (1+sl_pct/100)
-            tp = sig["price"] * (1+TAKE_PROFIT_PCT/100) if sig["signal"]=="LONG" else sig["price"] * (1-TAKE_PROFIT_PCT/100)
-            emoji = "🟢" if sig["signal"]=="LONG" else "🔴"
+            sl = sig["price"] * (1 - sl_pct / 100) if sig["signal"] == "LONG" else sig["price"] * (1 + sl_pct / 100)
+            tp = sig["price"] * (1 + TAKE_PROFIT_PCT / 100) if sig["signal"] == "LONG" else sig["price"] * (1 - TAKE_PROFIT_PCT / 100)
+            emoji = "🟢" if sig["signal"] == "LONG" else "🔴"
 
-            # ── Immediate MARKET order ──
             from trading import place_order, set_leverage, calc_quantity_from_risk
             try:
                 set_leverage(sym, LEVERAGE)
                 qty = calc_quantity_from_risk(sym, float(acc_bal.get("availableBalance", 0)) if acc_bal else 4000, sig["price"], STOP_LOSS_PCT_FALLBACK, LEVERAGE)
-                if qty <= 0: continue
+                if qty <= 0:
+                    continue
 
                 side = "BUY" if sig["signal"] == "LONG" else "SELL"
                 result = place_order(sym, side, "MARKET", qty)
@@ -765,16 +541,16 @@ def scan_cycle():
                 if result and result.get("orderId"):
                     fills = result.get("fills", [{}])
                     avg_price = float(fills[0].get("price", sig["price"])) if fills else sig["price"]
-                    print(f"\n{'='*55}")
+                    print(f"\n{'=' * 55}")
                     print(f"  🚨 ENTRY: {sym} {sig['signal']} @ ${avg_price}")
                     print(f"     Qty: {qty} | Lev: {LEVERAGE}x | Conf: {sig['confidence']}/9")
                     print(f"     RSI: {sig['rsi']} | Mom: {sig['mom5']:+.2f}% | Vol: {sig['vol_ratio']}")
                     print(f"     SL: ${sl:.4f} | TP: ${tp:.4f}")
-                    print(f"{'='*55}")
+                    print(f"{'=' * 55}")
                     discord_notify(
                         f"✅ ENTRY: {sym} {sig['signal']} — MARKET FILLED",
                         f"**Price:** `${avg_price}`\n**Qty:** `{qty}`\n**Leverage:** {LEVERAGE}x\n**Conf:** {sig['confidence']}/9\n**RSI:** `{sig['rsi']}` | **Mom:** `{sig['mom5']:+.2f}%`\n**SL:** `${sl:.4f}` | **TP:** `${tp:.4f}`",
-                        color=0x00FF00 if sig["signal"]=="LONG" else 0xFF4444
+                        color=0x00FF00 if sig["signal"] == "LONG" else 0xFF4444
                     )
                 else:
                     print(f"  ❌ ORDER FAILED: {sym} {sig['signal']} — no fill")
@@ -788,25 +564,23 @@ def scan_cycle():
 
             time.sleep(1)
 
-        # Update Discord board with open positions
+        # Update Discord board
         try:
             positions = get_positions()
         except:
             positions = None
-        embed = build_board_embed(board_data, positions)
+        embed = build_board_embed(board_data, positions, BASE_URL)
         msg_id = get_board_msg_id()
         if msg_id:
             result = discord_req("PATCH", f"/channels/{DISCORD_BOARD_CHANNEL_ID}/messages/{msg_id}",
-                               data={"content": None, "embeds": [embed]})
+                                data={"content": None, "embeds": [embed]})
             if not result:
-                print(f"[DISCORD] PATCH failed for msg_id={msg_id} — will create new message")
                 msg_id = None
             else:
                 print(f"[DISCORD] Board updated: msg_id={msg_id}")
-
         if not msg_id:
             result = discord_req("POST", f"/channels/{DISCORD_BOARD_CHANNEL_ID}/messages",
-                               data={"content": None, "embeds": [embed]})
+                                data={"content": None, "embeds": [embed]})
             if result and result.get("id"):
                 save_board_msg_id(result["id"])
                 print(f"[DISCORD] New board created: msg_id={result['id']}")
@@ -818,32 +592,25 @@ def scan_cycle():
         print(f"  [SCAN ERROR] {e}")
         self_heal_circuit_breaker()
 
-# ─── ENTRY POINT ───────────────────────────────────────���────────────────────
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
     global autopilot_paused_until, consecutive_scan_errors
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  🐤 PROFESSOR MODE - Unified Trading System")
     print(f"  Config: SL={STOP_LOSS_PCT}% | TP={TAKE_PROFIT_PCT}% | Lev={LEVERAGE}x")
-    print(f"  Channels: Scanner({SCAN_INTERVAL}s) | SL/TP({SLTP_INTERVAL}s) | Autopilot({AUTOPILOT_INTERVAL/60:.0f}min)")
-    print(f"{'='*60}\n")
+    print(f"  Channels: Scanner({SCAN_INTERVAL}s) | SL/TP({SLTP_INTERVAL}s) | Autopilot({AUTOPILOT_INTERVAL / 60:.0f}min)")
+    print(f"{'=' * 60}\n")
 
     last_autopilot = 0
 
     while True:
         try:
             loop_start = time.time()
-
-            # ── Scanner cycle ──
             scan_cycle()
-
-            # ── Health check (self-healing) ──
             self_heal_health_check()
-
-            # ── SL/TP check + drawdown monitor ──
             check_sl_tp()
 
-            # ── Autopilot (if not paused) ──
             if autopilot_paused_until > 0:
                 if time.time() >= autopilot_paused_until:
                     autopilot_paused_until = 0
@@ -859,8 +626,7 @@ def main():
                 last_autopilot = time.time()
 
             elapsed = time.time() - loop_start
-            sleep_time = max(1, SCAN_INTERVAL - elapsed)
-            time.sleep(sleep_time)
+            time.sleep(max(1, SCAN_INTERVAL - elapsed))
 
         except KeyboardInterrupt:
             print("\nProfessor Mode stopped.")
