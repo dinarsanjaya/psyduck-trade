@@ -512,7 +512,6 @@ def check_sl_tp():
                     emoji = "✅" if level.startswith("TP") else "❌"
                     color = 0x00FF00 if level.startswith("TP") else 0xFF4444
                     level_name = level.replace("TP1", "TP 50%").replace("TP2", "TP 100%")
-                    realized_pnl = float(result.get("realizedPnl", 0))
                     exit_price = current_price
                     fills = result.get("fills", [])
                     if fills:
@@ -520,6 +519,12 @@ def check_sl_tp():
                             exit_price = sum(float(f.get("price", 0)) for f in fills) / len(fills)
                         except:
                             pass
+                    # Calculate realized PnL manually
+                    if exit_price and entry:
+                        is_long = (direction == "LONG")
+                        realized_pnl = (exit_price - entry) * close_qty if is_long else (entry - exit_price) * close_qty
+                    else:
+                        realized_pnl = 0.0
                     print(f"\n{'='*55}")
                     print(f"{emoji} {sym} {level_name} HIT! Qty: {close_qty:.4f}")
                     print(f"   Entry: ${entry} | Exit: ${exit_price:.4f} | Realized PnL: ${realized_pnl:+.4f}")

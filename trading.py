@@ -153,7 +153,6 @@ def close_all_positions():
             side = "BUY"
         result = market_close(sym, side, abs(amt))
         if result and result.get("orderId"):
-            realized_pnl = float(result.get("realizedPnl", 0))
             avg_fill = None
             fills = result.get("fills", [])
             if fills:
@@ -161,13 +160,19 @@ def close_all_positions():
                     avg_fill = sum(float(f.get("price", 0)) for f in fills) / len(fills)
                 except:
                     avg_fill = None
+            # Calculate realized PnL manually
+            if avg_fill and entry:
+                is_long = amt > 0
+                pnl = (avg_fill - entry) * abs(amt) if is_long else (entry - avg_fill) * abs(amt)
+            else:
+                pnl = 0.0
             results.append({
                 "symbol": sym,
                 "side": "LONG" if amt > 0 else "SHORT",
                 "entry": entry,
                 "exit": avg_fill,
                 "qty": abs(amt),
-                "realized_pnl": realized_pnl,
+                "realized_pnl": pnl,
                 "order_id": result.get("orderId"),
             })
         time.sleep(0.3)
