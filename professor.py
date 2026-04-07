@@ -14,6 +14,7 @@ warnings.filterwarnings("ignore")
 from datetime import datetime, timezone
 import pytz
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 from config import (
@@ -678,15 +679,20 @@ def scan_cycle():
             if len(ticker_history[sym]) > 20:
                 ticker_history[sym] = ticker_history[sym][-20:]
 
-        # Build board rows — fetch klines for top coins (SEQUENTIAL)
+        # Build board rows — fetch klines for top coins (PARALLEL)
         klines_cache = {}
         scan_count = len(COINS_WHITELIST) if COIN_UNIVERSE == "whitelist" else (50 if COIN_UNIVERSE == "top_movers" else 50)
-        for sym, _ in top[:scan_count]:
-            try:
-                kl = fetch_klines(sym)
-                klines_cache[sym] = kl
-            except:
-                pass
+        syms_to_fetch = [sym for sym, _ in top[:scan_count]]
+        with ThreadPoolExecutor(max_workers=min(20, len(syms_to_fetch))) as executor:
+            futures = {executor.submit(fetch_klines, sym): sym for sym in syms_to_fetch}
+            for future in as_completed(futures):
+                sym = futures[future]
+                try:
+                    kl = future.result()
+                    if kl:
+                        klines_cache[sym] = kl
+                except:
+                    pass
 
         rows = []
         for sym, ticker in top:
