@@ -279,6 +279,10 @@ def test_connection():
 
 if __name__ == "__main__":
     import sys
+    import requests
+    from datetime import datetime
+    import pytz
+
     if len(sys.argv) > 1 and sys.argv[1] == "--close-all":
         print("[*] Closing all positions...")
         results = close_all_positions()
@@ -286,10 +290,42 @@ if __name__ == "__main__":
             print("[*] No open positions to close.")
         else:
             total = 0.0
+            lines = []
             for r in results:
                 emoji = "✅" if r["realized_pnl"] >= 0 else "❌"
-                print(f"  {emoji} {r['symbol']} {r['side']} | Entry: ${r['entry']:.4f} | Exit: ${r['exit']:.4f if r['exit'] else 'N/A'} | PnL: ${r['realized_pnl']:+.4f}")
+                exit_str = f"${r['exit']:.4f}" if r['exit'] else "N/A"
+                print(f"  {emoji} {r['symbol']} {r['side']} | Entry: ${r['entry']:.4f} | Exit: {exit_str} | PnL: ${r['realized_pnl']:+.4f}")
+                lines.append(f"{emoji} **{r['symbol']}** {r['side']} | Entry `${r['entry']:.4f}` | Exit `{exit_str}` | PnL `${r['realized_pnl']:+.4f}`")
                 total += r["realized_pnl"]
+
+            emoji_total = "🟢" if total >= 0 else "🔴"
             print(f"\n  Total Realized PnL: ${total:+.4f}")
+
+            # Send Discord notification
+            try:
+                import warnings
+                warnings.filterwarnings("ignore")
+                from config import DISCORD_SIGNAL_WEBHOOK_URL
+                from_zone = pytz.timezone("Asia/Jakarta")
+                ts = datetime.now(from_zone).strftime("%H:%M:%S WIB")
+                payload = {
+                    "username": "Professor Psyduck 🐤",
+                    "embeds": [{
+                        "title": f"{emoji_total} Close All — {len(results)} Positions",
+                        "description": "\n".join(lines),
+                        "color": 0x00FF00 if total >= 0 else 0xFF4444,
+                        "footer": {"text": f"Professor Mode 🐤 | {ts}"},
+                        "fields": [
+                            {"name": "Total Realized PnL", "value": f"**${total:+.4f}**", "inline": True}
+                        ]
+                    }]
+                }
+                r = requests.post(DISCORD_SIGNAL_WEBHOOK_URL, json=payload, timeout=10)
+                if r.status_code in (200, 204):
+                    print("[*] Discord notification sent.")
+                else:
+                    print(f"[!] Discord notification failed: {r.status_code}")
+            except Exception as e:
+                print(f"[!] Discord notification error: {e}")
     else:
         print("Usage: python trading.py --close-all")
