@@ -1,0 +1,5 @@
+# Proxy Configuration
+# Copy this to proxy.txt and add your proxy credentials
+# Format: http://user:pass@host:port (one per line)
+
+http://your_proxy_user:your_proxy_pass@your_proxy_host:8080

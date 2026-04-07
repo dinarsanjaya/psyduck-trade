@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"https://testnet.binancefuture.com/fapi/v1/exchangeInfo\")",
+      "Bash(python3 -c ':*)",
+      "WebFetch(domain:minimax-algeng-chat-tts-us.oss-us-east-1.aliyuncs.com)",
+      "Bash(git init:*)"
+    ]
+  }
+}
