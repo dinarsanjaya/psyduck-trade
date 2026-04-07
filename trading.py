@@ -274,3 +274,22 @@ def test_connection():
         if asset.get("asset") == "USDT" and float(asset.get("availableBalance", 0)) > 0:
             print(f"    USDT Balance: {asset['availableBalance']}")
     return True
+
+# ─── CLI ─────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--close-all":
+        print("[*] Closing all positions...")
+        results = close_all_positions()
+        if not results:
+            print("[*] No open positions to close.")
+        else:
+            total = 0.0
+            for r in results:
+                emoji = "✅" if r["realized_pnl"] >= 0 else "❌"
+                print(f"  {emoji} {r['symbol']} {r['side']} | Entry: ${r['entry']:.4f} | Exit: ${r['exit']:.4f if r['exit'] else 'N/A'} | PnL: ${r['realized_pnl']:+.4f}")
+                total += r["realized_pnl"]
+            print(f"\n  Total Realized PnL: ${total:+.4f}")
+    else:
+        print("Usage: python trading.py --close-all")
