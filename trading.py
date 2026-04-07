@@ -135,6 +135,44 @@ def cancel_all_open(symbol):
     params = {"symbol": symbol}
     return _request("DELETE", "/fapi/v1/allOpenOrders", params)
 
+def close_all_positions():
+    """Close ALL open positions. Returns list of close results with PnL info."""
+    positions = get_positions()
+    if not positions:
+        return []
+    results = []
+    for p in positions:
+        amt = float(p.get("positionAmt", 0))
+        if amt == 0:
+            continue
+        sym = p["symbol"]
+        entry = float(p["entryPrice"])
+        if amt > 0:
+            side = "SELL"
+        else:
+            side = "BUY"
+        result = market_close(sym, side, abs(amt))
+        if result and result.get("orderId"):
+            realized_pnl = float(result.get("realizedPnl", 0))
+            avg_fill = None
+            fills = result.get("fills", [])
+            if fills:
+                try:
+                    avg_fill = sum(float(f.get("price", 0)) for f in fills) / len(fills)
+                except:
+                    avg_fill = None
+            results.append({
+                "symbol": sym,
+                "side": "LONG" if amt > 0 else "SHORT",
+                "entry": entry,
+                "exit": avg_fill,
+                "qty": abs(amt),
+                "realized_pnl": realized_pnl,
+                "order_id": result.get("orderId"),
+            })
+        time.sleep(0.3)
+    return results
+
 # ─── QUANTITY ────────────────────────────────────────────────────────────────
 
 def get_symbol_precision(symbol):

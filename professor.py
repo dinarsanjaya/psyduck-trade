@@ -153,7 +153,7 @@ def save_board_msg_id(msg_id):
     with open(BOARD_MSG_FILE, "w") as f:
         f.write(str(msg_id))
 
-def discord_notify(title, description, color=0xFFAA00):
+def discord_notify(title, description, color=0xFFAA00, fields=None):
     payload = {
         "username": "Professor Psyduck 🐤",
         "embeds": [{
@@ -163,6 +163,8 @@ def discord_notify(title, description, color=0xFFAA00):
             "footer": {"text": f"Professor Mode 🐤 | {datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%H:%M:%S WIB')}"}
         }]
     }
+    if fields:
+        payload["embeds"][0]["fields"] = fields
     try:
         r = requests.post(DISCORD_SIGNAL_WEBHOOK_URL, json=payload, timeout=10)
         if r.status_code not in (200, 204):
@@ -475,12 +477,10 @@ def check_sl_tp():
                 sl_price = round(entry * (1 - sl_pct/100), 8)
                 tp1_price = round(entry * (1 + TAKE_PROFIT_PCT/100 * TP_1_RATIO), 8)
                 tp2_price = round(entry * (1 + TAKE_PROFIT_PCT/100 * TP_2_RATIO), 8)
-                pnl_pct = (price - entry) / entry * 100 * LEVERAGE
             else:
                 sl_price = round(entry * (1 + sl_pct/100), 8)
                 tp1_price = round(entry * (1 - TAKE_PROFIT_PCT/100 * TP_1_RATIO), 8)
                 tp2_price = round(entry * (1 - TAKE_PROFIT_PCT/100 * TP_2_RATIO), 8)
-                pnl_pct = (entry - price) / entry * 100 * LEVERAGE
 
             # Check SL
             triggered = None
@@ -505,7 +505,6 @@ def check_sl_tp():
                     print(f"[SLTP] {sym} {direction}: price={price:.4f} entry={entry:.4f} sl={sl_price:.4f} tp1={tp1_price:.4f} tp2={tp2_price:.4f} upnl={upnl:.2f}")
             else:
                 level, level_price, current_price, close_qty = triggered
-                pnl_pct = (current_price - entry) / entry * 100 * LEVERAGE if direction == "LONG" else (entry - current_price) / entry * 100 * LEVERAGE
                 print(f"[SLTP] {sym} {direction} — {level} triggered! price={price:.4f} vs level={level_price:.4f}, qty={close_qty:.4f}")
 
                 result = market_close(sym, side, close_qty)
@@ -513,13 +512,21 @@ def check_sl_tp():
                     emoji = "✅" if level.startswith("TP") else "❌"
                     color = 0x00FF00 if level.startswith("TP") else 0xFF4444
                     level_name = level.replace("TP1", "TP 50%").replace("TP2", "TP 100%")
+                    realized_pnl = float(result.get("realizedPnl", 0))
+                    exit_price = current_price
+                    fills = result.get("fills", [])
+                    if fills:
+                        try:
+                            exit_price = sum(float(f.get("price", 0)) for f in fills) / len(fills)
+                        except:
+                            pass
                     print(f"\n{'='*55}")
                     print(f"{emoji} {sym} {level_name} HIT! Qty: {close_qty:.4f}")
-                    print(f"   Entry: ${entry} | Exit: ${current_price} | PnL: ~{pnl_pct:+.1f}%")
+                    print(f"   Entry: ${entry} | Exit: ${exit_price:.4f} | Realized PnL: ${realized_pnl:+.4f}")
                     print(f"{'='*55}")
                     discord_notify(
                         f"{emoji} {sym} {level_name} Hit",
-                        f"**Direction:** {direction}\n**Entry:** `${entry}`\n**Exit:** `${current_price}`\n**Qty:** `{close_qty:.4f}`\n**PnL:** ~{pnl_pct:+.1f}%\n**Leverage:** {LEVERAGE}x",
+                        f"**Direction:** {direction}\n**Entry:** `${entry}`\n**Exit:** `${exit_price:.4f}`\n**Qty:** `{close_qty:.4f}`\n**Realized PnL:** `${realized_pnl:+.4f}`\n**Leverage:** {LEVERAGE}x",
                         color=color
                     )
                 time.sleep(0.5)
