@@ -69,17 +69,17 @@ def discord_notify(title, description, color=0xFFAA00, fields=None):
 
 
 def get_mark_prices(symbols, BASE_URL):
-    """Get current mark prices for symbols."""
+    """Get current mark prices for symbols using batch endpoint."""
     result = {}
+    if not symbols or not BASE_URL:
+        return result
     try:
         url = f"{BASE_URL}/fapi/v1/ticker/price"
-        for sym in symbols:
-            try:
-                r = requests.get(url, params={"symbol": sym}, timeout=5)
-                if r.status_code == 200:
-                    result[sym] = float(r.json()["price"])
-            except:
-                pass
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            for item in r.json():
+                if item.get("symbol") in symbols:
+                    result[item["symbol"]] = float(item["price"])
     except:
         pass
     return result
@@ -145,12 +145,13 @@ def build_board_embed(data, positions=None, BASE_URL=None):
             entry = float(p["entryPrice"])
             sym = p["symbol"]
             upnl = float(p.get("unRealizedProfit", 0))
-            mark = mark_prices.get(sym, entry)
+            mark = mark_prices.get(sym) or float(p.get("markPrice", entry))
             side = "🟢LONG" if amt > 0 else "🔴SHORT"
             emoji = "🟢" if upnl >= 0 else "🔴"
             notional = entry * abs(amt)
-            pnl_pct = (upnl / notional) * 100 * LEVERAGE if notional > 0 else 0
-            pos_lines.append(f"{emoji} **{sym}** {side} `${abs(amt)}` | Mark `${mark:.2f}` | Entry `${entry:.2f}` | PnL `${upnl:+.2f}` ({pnl_pct:+.1f}%) | Lev `{LEVERAGE}x`")
+            margin = notional / LEVERAGE
+            pnl_pct = (upnl / margin) * 100 if margin > 0 else 0
+            pos_lines.append(f"{emoji} **{sym}** {side} `${abs(amt)}` | Mark `${mark:.4f}` | Entry `${entry:.4f}` | PnL `${upnl:+.4f}` ({pnl_pct:+.1f}%) | Lev `{LEVERAGE}x`")
             total_pnl += upnl
 
         fields.append({
