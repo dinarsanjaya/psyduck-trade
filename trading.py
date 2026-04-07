@@ -140,7 +140,18 @@ def close_all_positions():
     positions = get_positions()
     if not positions:
         return []
+
+    # Get balance before closing
+    acc_before = get_account()
+    balance_before = 0.0
+    if acc_before:
+        for a in acc_before:
+            if a.get("asset") == "USDT":
+                balance_before = float(a.get("availableBalance", 0))
+                break
+
     results = []
+    running_balance = balance_before
     for p in positions:
         amt = float(p.get("positionAmt", 0))
         if amt == 0:
@@ -160,22 +171,28 @@ def close_all_positions():
                     avg_fill = sum(float(f.get("price", 0)) for f in fills) / len(fills)
                 except:
                     avg_fill = None
-            # Calculate realized PnL manually
-            if avg_fill and entry:
-                is_long = amt > 0
-                pnl = (avg_fill - entry) * abs(amt) if is_long else (entry - avg_fill) * abs(amt)
-            else:
-                pnl = 0.0
             results.append({
                 "symbol": sym,
                 "side": "LONG" if amt > 0 else "SHORT",
                 "entry": entry,
                 "exit": avg_fill,
                 "qty": abs(amt),
-                "realized_pnl": pnl,
+                "realized_pnl": None,
                 "order_id": result.get("orderId"),
             })
         time.sleep(0.3)
+        # Get balance after each close to track per-coin PnL
+        acc_after = get_account()
+        if acc_after:
+            for a in acc_after:
+                if a.get("asset") == "USDT":
+                    balance_after = float(a.get("availableBalance", 0))
+                    break
+            # Delta is only the last coin's PnL
+            if results:
+                results[-1]["realized_pnl"] = balance_after - running_balance
+                running_balance = balance_after
+
     return results
 
 # ─── QUANTITY ────────────────────────────────────────────────────────────────
