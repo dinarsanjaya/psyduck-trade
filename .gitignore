@@ -1,0 +1,24 @@
+# Credentials — NEVER commit
+config.py
+proxy.txt
+board_msg_id.txt
+
+# Runtime data
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+live_board_data.json
+professor.out
+professor.log
+*.log
+
+# Environment
+.env
+.env.*
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
