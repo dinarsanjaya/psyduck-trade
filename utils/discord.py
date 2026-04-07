@@ -154,9 +154,16 @@ def build_board_embed(data, positions=None, BASE_URL=None):
             pos_lines.append(f"{emoji} **{sym}** {side} `${abs(amt)}` | Mark `${mark:.4f}` | Entry `${entry:.4f}` | PnL `${upnl:+.4f}` ({pnl_pct:+.1f}%) | Lev `{LEVERAGE}x`")
             total_pnl += upnl
 
+        pos_text = "\n".join(pos_lines)
+        # Discord field value max = 1024 chars
+        if len(pos_text) > 1024:
+            pos_text = pos_text[:1021] + "..."
+        if len(open_pos) > 10:
+            pos_text += f"\n_...and {len(open_pos) - 10} more positions_"
+
         fields.append({
             "name": f"📊 Open Positions ({len(open_pos)}) | Total PnL: `{total_pnl:+.2f}`",
-            "value": "\n".join(pos_lines),
+            "value": pos_text,
             "inline": False
         })
 
