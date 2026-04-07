@@ -30,8 +30,8 @@ from config import (
 from proxies import get_proxy, get_proxy_dict, reset_proxy
 reset_proxy()
 
-BOARD_MSG_FILE = "/home/clore/.openclaw/workspace/trading-bot/board_msg_id.txt"
-LIVE_DATA_FILE = "/home/clore/.openclaw/workspace/trading-bot/live_board_data.json"
+BOARD_MSG_FILE = "trading-bot/board_msg_id.txt"
+LIVE_DATA_FILE = "trading-bot/live_board_data.json"
 SCAN_INTERVAL = 60   # seconds between full scans (klines fetch takes ~57s)
 SLTP_INTERVAL = 30   # seconds between SL/TP checks
 AUTOPILOT_INTERVAL = 600  # 10 minutes
