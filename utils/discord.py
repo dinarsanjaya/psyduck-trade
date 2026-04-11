@@ -97,10 +97,12 @@ def build_board_embed(data, positions=None, BASE_URL=None):
     def fmt(r):
         ema = r.get("ema")
         ema_str = f" | EMA `${ema:.4f}`" if ema else ""
+        adx = r.get("adx")
+        adx_str = f" | ADX `{adx:.0f}`" if adx else ""
         arrow = r.get("arrow", "▲")
         chg = r.get("change_pct", 0)
         arrow_str = f"{arrow}{abs(chg):.2f}%"
-        return f'`{r["symbol"]}` {arrow_str} RSI `{r["rsi"]:.0f}` Mom `{r["mom5"]:+.2f}%`{ema_str}'
+        return f'`{r["symbol"]}` {arrow_str} RSI `{r["rsi"]:.0f}` Mom `{r["mom5"]:+.2f}%`{ema_str}{adx_str}'
 
     sections = []
     if longs:

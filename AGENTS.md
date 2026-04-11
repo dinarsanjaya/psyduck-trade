@@ -3,59 +3,64 @@
 ## Entry Points
 
 - **`professor.py`** — Main unified system: live scanner, Discord board updater, SL/TP watchdog, and autopilot executor. Run with `python3 professor.py`.
-- **`trading.py`** — Order execution module: place/market/close orders, leverage, position sizing, account queries. Imported by `professor.py`.
-- **`risk.py`** — Risk management: drawdown breaker, dynamic SL (ATR-based), Kelly criterion sizing, entry quality scoring, trade journal.
-- **`proxies.py`** — Proxy rotation from `proxy.txt` (sticky per session). `reset_proxy()` re-randomizes.
+- **`trading.py`** — Order execution: place/market/close orders, leverage, position sizing, account queries. CLI: `python3 trading.py --close-all`.
+- **`risk.py`** — Risk management: drawdown breaker, dynamic SL (ATR-based), Kelly criterion sizing, entry quality scoring, trade journal. **Not actively used by professor.py** (inline SL/TP logic used instead).
+- **`proxies.py`** — Stub module. Returns `None`/`{}` — no actual proxy routing. `proxy.txt` exists but is not consumed.
 - **`config.py`** — All settings: API keys, SL/TP %, leverage, coin whitelist, strategy parameters, Discord tokens.
+- **`utils/indicators.py`** — RSI, momentum, EMA, ATR, ADX, volume ratio calculations.
+- **`utils/discord.py`** — Discord webhook/board helpers.
 
 ## Running
 
 ```bash
+pip install -r requirements.txt
 python3 professor.py
 ```
 
 ## Runtime Requirements
 
-- **`proxy.txt`** — proxy credentials (format: `http://user:pass@host:port`, one per line). Without it the bot raises `RuntimeError`.
-- **`config.py`** — must have valid Binance Futures Testnet API keys (`FUTURES_URL = "https://testnet.binancefuture.com"`). Testnet keys required — demo keys don't fill orders.
+- **`requirements.txt`** — `requests`, `pytz`
+- **`config.py`** — valid Binance Futures API keys. `FUTURES_URL = "https://fapi.binance.com"` (production).
+- **`proxy.txt`** — proxy credentials (format: `http://user:pass@host:port`, one per line). Optional — not consumed by current `proxies.py` stub.
 - Signing style: **params NOT sorted** (natural order), `timestamp` + `recvWindow` + `signature` appended to query string.
-- All HTTP requests route through sticky proxy (`get_proxy()`).
+- All HTTP requests route through `get_proxy()` (currently stubbed to `None`).
 
-## Strategy (v2 — Improved)
+## Strategy
 
-**Coin Universe:** Strict whitelist of 15 quality coins. No garbage pumps/dumps.
+**Coin Universe:** `COIN_UNIVERSE` setting in config (`"top_movers"`). `COINS_WHITELIST` includes BTC, ETH, BNB, SOL, XRP, ADA, AVAX, DOT, MATIC, LINK, UNI, ATOM, NEAR, AAVE, LTC, APT, ARB, OP + meme coins (DOGE, SHIB, PEPE, FLOKI, WIF).
 
-**Signal Types:**
-- 📈BOUNCE — RSI < 30 + momentum > 0.15% + price above EMA(20)
-- 📉FADE — RSI > 70 + momentum < -0.15% + price below EMA(20)
-- ⚡SPIKE — Volume spike > 1.5x + momentum alignment with EMA trend
+**Signal Scoring (bullScore/bearScore):**
+- RSI < 30 → bullScore +3 | RSI > 70 → bearScore +3
+- MACD histogram > 0 → bullScore +2 | < 0 → bearScore +2
+- EMA9 > EMA21 > EMA50 → bullScore +3 | EMA9 < EMA21 < EMA50 → bearScore +3
+- BB position < 0.2 → bullScore +2 | > 0.8 → bearScore +2
+- Volume > 2x avg + green → bullScore +1 | + red → bearScore +1
+- Momentum > +2% → bullScore +1 | < -2% → bearScore +1
 
-**Entry Filters (all must pass):**
-- Confidence >= 7/9
-- EMA trend confirmation (price > EMA for LONG, price < EMA for SHORT)
-- Volume ratio >= 1.5x
+**Signal Decision:**
+- bullScore >= 3 AND diff >= 1 → LONG, conf = min(5 + diff, 10)
+- bearScore >= 3 AND diff <= -1 → SHORT, conf = min(5 + |diff|, 10)
+- diff >= 1 → LEAN_LONG (conf 6) | diff <= -1 → LEAN_SHORT (conf 6)
 
-**Exit Rules:**
-- Dynamic SL via ATR (2x ATR, min 2.5%)
-- Partial TP: close 50% at 2:1 R:R, remaining at 3:1 R:R
+**Risk Management:**
+- SL: 1.5× ATR from entry
+- TP1: 1.5× ATR (RR 1:1.5) — close 50%
+- TP2: 3× ATR (RR 1:3) — close remaining
 
-**Autopilot:** Runs every 10 min. Takes positions if `open_count < MAX_POSITIONS` and confidence >= 7/9.
+**Autopilot:** Runs every 15 min. Takes positions if `open_count < MAX_POSITIONS` and confidence >= 7.
 
 ## State Files
 
 | File | Purpose |
 |---|---|
 | `board_msg_id.txt` | Discord embed message ID (persists across restarts) |
-| `live_board_data.json` | Latest scanner data (updated every scan cycle) |
 
 ## Discord Integration
 
-- Bot token and webhook URL in `config.py`.
-- `CHANNEL_ID = "1412841283315302543"` hardcoded in `professor.py`.
+- Bot token, webhook URL, and channel IDs in `config.py` (`DISCORD_BOT_TOKEN`, `DISCORD_SIGNAL_WEBHOOK_URL`, `DISCORD_BOARD_CHANNEL_ID`, `DISCORD_SIGNAL_CHANNEL_ID`).
 - Board message created once, updated in-place via PATCH each cycle.
 
-## What NOT to Change
+## API quirks
 
-- Do not commit `proxy.txt` or any file containing credentials.
-- Do not change `FUTURES_URL` to production — this bot is testnet only.
-- Algo orders (STOP_MARKET, TAKE_PROFIT_MARKET) return HTTP 4120 on testnet — SL/TP uses manual price-check watchdog instead.
+- Algo orders (STOP_MARKET, TAKE_PROFIT_MARKET) return HTTP 412 on testnet — SL/TP uses manual price-check watchdog instead.
+- Time offset synced with Binance server on startup via `_sync_time()` in `trading.py`.

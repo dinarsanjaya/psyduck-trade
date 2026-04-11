@@ -118,6 +118,11 @@ def place_order(symbol, side, order_type, quantity, price=None, stop_price=None)
     return _request("POST", "/fapi/v1/order", params)
 
 def market_close(symbol, side, quantity):
+    prec = get_symbol_precision(symbol)
+    step = 10 ** (-prec) if prec > 0 else 1
+    quantity = round(round(quantity / step) * step, prec)
+    if quantity <= 0:
+        quantity = step
     params = {
         "symbol":     symbol,
         "side":       side,
